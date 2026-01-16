@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 通过图像分析检测PK场景
-PK场景特征：左右分屏结构
+PK场景特征：上下黑边
 依赖: Pillow (pip3 install pillow)
 """
 
@@ -18,8 +18,9 @@ def get_gray_array(img):
 
 def detect_split_screen(image_path):
     """
-    检测图片是否存在左右分屏结构（PK场景特征）
-    返回: (是否分屏, 分隔线位置比例)
+    检测图片是否存在PK场景
+    PK视频特征：1:1正方形画面在9:16竖屏设备上播放时，上下会有单色填充块
+    返回: (是否PK, 0)
     """
     try:
         img = Image.open(image_path)
@@ -29,51 +30,45 @@ def detect_split_screen(image_path):
     w, h = img.size
     gray_data = get_gray_array(img)
 
-    # 方法1: 检测中间垂直分隔线
-    mid_start = w // 3
-    mid_end = 2 * w // 3
+    # 跳过纯黑/过暗的画面（开场黑屏等）
+    avg_brightness = sum(gray_data) / len(gray_data)
+    if avg_brightness < 20:
+        return False, 0
 
-    best_line = None
-    best_score = 0
-
-    for x in range(mid_start, mid_end):
-        left_vals = []
-        right_vals = []
-        for y in range(h):
-            idx = y * w + x
-            if idx > 0:
-                left_vals.append(gray_data[idx - 1])
-            if idx + 1 < len(gray_data):
-                right_vals.append(gray_data[idx + 1])
-
-        if left_vals and right_vals:
-            diff = sum(abs(a - b) for a, b in zip(left_vals, right_vals)) / h
-            if diff > best_score:
-                best_score = diff
-                best_line = x
-
-    if best_score > 15:
-        line_pos = best_line / w
-        return True, line_pos
-
-    # 方法2: 检测左右两侧的相似度
-    thumb_w, thumb_h = 100, 100
-    thumb = img.resize((thumb_w, thumb_h)).convert('L')
+    # 检测上下单色填充块（像素变化很小）
+    # 使用缩略图加速计算
+    thumb = img.resize((w // 4, h // 4)).convert('L')
     thumb_data = list(thumb.getdata())
+    tw, th = w // 4, h // 4
 
-    left_data = thumb_data[:thumb_w * thumb_h // 2]
-    right_data = thumb_data[thumb_w * thumb_h // 2:]
+    # 检测上填充块
+    top_fill = 0
+    for y in range(th):
+        row = thumb_data[y * tw:(y + 1) * tw]
+        row_avg = sum(row) / len(row)
+        row_std = (sum((x - row_avg) ** 2 for x in row) / len(row)) ** 0.5
+        if row_std < 10:  # 颜色均匀
+            top_fill += 1
+        else:
+            break
 
-    left_avg = sum(left_data) / len(left_data)
-    right_avg = sum(right_data) / len(right_data)
-    brightness_diff = abs(left_avg - right_avg)
+    # 检测下填充块
+    bottom_fill = 0
+    for y in range(th - 1, -1, -1):
+        row = thumb_data[y * tw:(y + 1) * tw]
+        row_avg = sum(row) / len(row)
+        row_std = (sum((x - row_avg) ** 2 for x in row) / len(row)) ** 0.5
+        if row_std < 10:
+            bottom_fill += 1
+        else:
+            break
 
-    mid_data = [thumb_data[i] for i in range(thumb_w * thumb_h // 2, thumb_w * thumb_h // 2 + thumb_w)]
-    mid_avg = sum(mid_data) / len(mid_data)
-    side_avg = (left_avg + right_avg) / 2
+    total_fill = top_fill + bottom_fill
+    fill_ratio = total_fill / th
 
-    if mid_avg < side_avg * 0.9 and brightness_diff > 20:
-        return True, 0.5
+    # 判定PK：上下填充块占比超过15%
+    if fill_ratio > 0.15 and top_fill > 0 and bottom_fill > 0:
+        return True, 0
 
     return False, 0
 
@@ -95,24 +90,40 @@ def extract_frames(video_path, output_dir, num_frames=6):
     except:
         duration = 60
 
-    # 均匀采样
+    # 均匀采样，确保timestamp不超出视频时长
     interval = max(1, int(duration / num_frames))
     screenshots = []
 
     for i in range(num_frames):
-        timestamp = i * interval
+        timestamp = min(i * interval, duration - 0.1)
         output_path = os.path.join(output_dir, f"frame_{i:03d}.jpg")
         cmd = [
-            'ffmpeg', '-ss', str(timestamp),
+            'ffmpeg',
+            '-ss', str(timestamp),
             '-i', video_path,
             '-frames:v', '1',
-            '-q:v', '2',
+            '-q:v', '10',
             '-y', output_path
         ]
-        subprocess.run(cmd, capture_output=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
         if os.path.exists(output_path):
             screenshots.append(output_path)
             print(f"  提取帧 {i+1}/{num_frames}: {timestamp}s -> frame_{i:03d}.jpg")
+        elif i == 0:
+            # 如果第一帧就失败，尝试用select滤镜提取第一帧
+            cmd_select = [
+                'ffmpeg',
+                '-i', video_path,
+                '-vf', 'select=eq(n\\,0)',
+                '-frames:v', '1',
+                '-q:v', '10',
+                '-y', output_path
+            ]
+            subprocess.run(cmd_select, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(output_path):
+                screenshots.append(output_path)
+                print(f"  提取帧 1/1: 0s -> frame_000.jpg (备用方法)")
 
     return screenshots
 
