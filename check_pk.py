@@ -10,6 +10,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import mimetypes
+
+def is_video_file(file_path):
+    """使用 mimetypes 检测文件类型"""
+    mime_type, _ = mimetypes.guess_type(str(file_path))
+    return mime_type is not None and mime_type.startswith('video/')
 
 def get_gray_array(img):
     """将图片转为灰度数组"""
@@ -43,34 +49,69 @@ def detect_split_screen(image_path):
 
     # 检测上填充块
     top_fill = 0
+    top_end_y = 0  # 记录上填充块的结束位置
     for y in range(th):
         row = thumb_data[y * tw:(y + 1) * tw]
         row_avg = sum(row) / len(row)
         row_std = (sum((x - row_avg) ** 2 for x in row) / len(row)) ** 0.5
         if row_std < 10:  # 颜色均匀
             top_fill += 1
+            top_end_y = y
         else:
             break
 
     # 检测下填充块
     bottom_fill = 0
+    bottom_start_y = th  # 记录下填充块的开始位置
     for y in range(th - 1, -1, -1):
         row = thumb_data[y * tw:(y + 1) * tw]
         row_avg = sum(row) / len(row)
         row_std = (sum((x - row_avg) ** 2 for x in row) / len(row)) ** 0.5
         if row_std < 10:
             bottom_fill += 1
+            bottom_start_y = y
         else:
             break
 
     total_fill = top_fill + bottom_fill
     fill_ratio = total_fill / th
 
-    # 判定PK：上下填充块占比超过15%
+    # 判定PK：上下填充块占比超过15% 且有明显的水平分割线
     if fill_ratio > 0.15 and top_fill > 0 and bottom_fill > 0:
-        return True, 0
+        if check_horizontal_split_line(thumb_data, tw, th, top_fill, bottom_start_y):
+            return True, 0
+        return False, 0
 
     return False, 0
+
+
+def check_horizontal_split_line(gray_data, w, h, top_fill, bottom_start_y):
+    """
+    检测上下纯色块与中间内容区域之间是否有明显的水平分割线
+    PK场景中，纯色填充块和正常画面之间应该有明显的边界
+    """
+    if h < 4 or top_fill >= h or bottom_start_y <= 0:
+        return False
+
+    # 检查上分割线：上填充块的最后一行与中间内容的第一行之间
+    top_line_y = top_fill - 1
+    top_fill_row = gray_data[top_line_y * w:(top_line_y + 1) * w]
+    content_row = gray_data[(top_fill) * w:(top_fill + 1) * w]
+
+    top_fill_avg = sum(top_fill_row) / len(top_fill_row)
+    content_avg = sum(content_row) / len(content_row)
+    top_diff = abs(top_fill_avg - content_avg)
+
+    # 检查下分割线：中间内容的最后一行与下填充块的第一行之间
+    content_bottom_row = gray_data[(bottom_start_y - 1) * w:bottom_start_y * w]
+    bottom_fill_row = gray_data[bottom_start_y * w:(bottom_start_y + 1) * w]
+
+    content_bottom_avg = sum(content_bottom_row) / len(content_bottom_row)
+    bottom_fill_avg = sum(bottom_fill_row) / len(bottom_fill_row)
+    bottom_diff = abs(content_bottom_avg - bottom_fill_avg)
+
+    # PK场景判定：上下都有明显的分割线（亮度差异明显）
+    return top_diff > 50 and bottom_diff > 50
 
 
 def extract_frames(video_path, output_dir, num_frames=6):
@@ -204,10 +245,14 @@ def check_pk_in_screenshots(screenshot_dir):
 def check_and_delete_pk_videos(directory, num_frames=6, dry_run=True):
     """检测目录下所有视频，删除包含PK场景的文件"""
     dir_path = Path(directory)
-    videos = sorted(dir_path.glob("*.flv"))
+    # videos = sorted(dir_path.glob("*.flv"))
+    videos = sorted(
+        p for p in dir_path.iterdir() 
+        if is_video_file(p)
+    )
 
     if not videos:
-        print(f"目录下未找到flv文件: {directory}")
+        print(f"目录下未找到视频文件: {directory}")
         return
 
     print(f"检测 {len(videos)} 个视频文件...\n")
@@ -232,7 +277,8 @@ def check_and_delete_pk_videos(directory, num_frames=6, dry_run=True):
     if pk_files:
         print(f"\n将删除 {len(pk_files)} 个文件:")
         for f in pk_files:
-            print(f"  - {f.name}")
+            size_mb = f.stat().st_size / (1024 * 1024)
+            print(f"  - {f.name} ({size_mb:.1f} MB)")
 
         if not dry_run:
             print("\n正在删除...")
