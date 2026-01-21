@@ -111,7 +111,10 @@ def check_horizontal_split_line(gray_data, w, h, top_fill, bottom_start_y):
     bottom_diff = abs(content_bottom_avg - bottom_fill_avg)
 
     # PK场景判定：上下都有明显的分割线（亮度差异明显）
-    return top_diff > 50 and bottom_diff > 50
+    # 放宽条件：如果某个分割线非常明显(>60)，另一个只要>25即可
+    return (top_diff > 50 and bottom_diff > 50) or \
+           (top_diff > 60 and bottom_diff > 25) or \
+           (bottom_diff > 60 and top_diff > 25)
 
 
 def extract_frames(video_path, output_dir, num_frames=6):
