@@ -42,12 +42,28 @@ def parse_composition_offset(payload):
     return value
 
 
-def iter_tags(path):
+def update_progress(label, position, total, last_percent):
+    percent = 0 if total == 0 else min(100, position * 100 // total)
+    if percent != last_percent:
+        print(f"\r{label}: {percent:3d}%", end="", file=sys.stderr, flush=True)
+    return percent
+
+
+def finish_progress(label):
+    print(f"\r{label}: 100%", file=sys.stderr, flush=True)
+
+
+def iter_tags(path, progress_label=None):
+    last_percent = -1
     with path.open("rb") as source_file:
         with mmap.mmap(source_file.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
             size_limit = len(mapped) - 15
             for match in re.finditer(rb"[\x08\x09\x12]", mapped):
                 offset = match.start()
+                if progress_label:
+                    last_percent = update_progress(
+                        progress_label, offset, len(mapped), last_percent
+                    )
                 if offset > size_limit:
                     continue
                 tag_type = mapped[offset]
@@ -66,6 +82,8 @@ def iter_tags(path):
                 stream_id = int.from_bytes(mapped[offset + 8:offset + 11], "big")
                 payload = mapped[offset + 11:offset + 11 + tag_size]
                 yield Tag(tag_type, tag_size, timestamp, stream_id, offset, payload)
+            if progress_label:
+                finish_progress(progress_label)
 
 
 def inspect_tags(path):
@@ -77,7 +95,7 @@ def inspect_tags(path):
     audio_keys = []
     video_keys = []
 
-    for tag in iter_tags(path):
+    for tag in iter_tags(path, "scanning"):
         payload = tag.payload
         if tag.type == 8 and payload and payload[0] >> 4 == 10:
             if len(payload) > 1 and payload[1] == 0:
@@ -159,7 +177,7 @@ def write_clean_flv(source, output, info):
         output_file.write(b"FLV\x01\x05\x00\x00\x00\t")
         output_file.write(b"\x00\x00\x00\x00")
 
-        for tag in iter_tags(source):
+        for tag in iter_tags(source, "rewriting"):
             payload = tag.payload
             if tag.type == 9 and payload and payload[0] & 0x0F == 7:
                 if len(payload) > 1 and payload[1] == 0:
