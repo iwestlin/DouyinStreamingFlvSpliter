@@ -86,62 +86,107 @@ def iter_tags(path, progress_label=None):
                 finish_progress(progress_label)
 
 
-def inspect_tags(path):
-    audio_packets = 0
-    video_packets = 0
+DISCONTINUITY_MS = 1000
+DUPLICATE_PREFIX_RATIO = 0.5
+
+
+def iter_media_packets(path, progress_label=None):
     sample_rate = None
     has_audio_config = False
     has_video_config = False
-    audio_keys = []
-    video_keys = []
+    media = []
 
-    for tag in iter_tags(path, "scanning"):
+    for tag in iter_tags(path, progress_label):
         payload = tag.payload
         if tag.type == 8 and payload and payload[0] >> 4 == 10:
             if len(payload) > 1 and payload[1] == 0:
                 has_audio_config = True
                 sample_rate = sample_rate or parse_aac_sample_rate(payload)
-            elif len(payload) > 1 and sample_rate:
-                audio_packets += 1
-                audio_keys.append((hashlib.sha1(payload).digest(), tag.timestamp))
+            elif len(payload) > 1:
+                media.append((8, tag.timestamp, hashlib.sha1(payload).digest()))
         elif tag.type == 9 and payload and payload[0] & 0x0F == 7:
             if len(payload) > 1 and payload[1] == 0:
                 has_video_config = True
             elif len(payload) >= 5:
-                video_packets += 1
-                video_keys.append((hashlib.sha1(payload).digest(), tag.timestamp))
+                media.append((9, tag.timestamp, hashlib.sha1(payload).digest()))
 
-    audio_prefix_skip = duplicate_prefix_count(audio_keys)
-    video_prefix_skip = duplicate_prefix_count(video_keys)
-    audio_packets -= audio_prefix_skip
-    video_packets -= video_prefix_skip
-    base = min(
-        audio_keys[audio_prefix_skip][1],
-        video_keys[video_prefix_skip][1],
+    return sample_rate, has_audio_config, has_video_config, media
+
+
+def redundant_prefix_len(media):
+    """Length of a leading run that is a redundant duplicate of a later run.
+
+    A run whose timestamps overlap a following run and whose packets are mostly
+    byte-identical is a stale copy prepended to the real body, so it must be
+    dropped to keep a single monotonic timeline.
+    """
+    if len(media) < 2:
+        return 0
+    split = None
+    for index in range(1, len(media)):
+        if media[index][1] < media[index - 1][1] - DISCONTINUITY_MS:
+            split = index
+            break
+    if split is None:
+        return 0
+    counts = Counter((tag_type, digest, timestamp) for tag_type, timestamp, digest in media)
+    prefix = media[:split]
+    duplicated = sum(
+        1
+        for tag_type, timestamp, digest in prefix
+        if counts[(tag_type, digest, timestamp)] > 1
     )
+    if duplicated < len(prefix) * DUPLICATE_PREFIX_RATIO:
+        return 0
+    return split
+
+
+def leading_duplicate_len(media):
+    if not media:
+        return 0
+    counts = Counter((tag_type, digest, timestamp) for tag_type, timestamp, digest in media)
+    length = 0
+    for tag_type, timestamp, digest in media:
+        if counts[(tag_type, digest, timestamp)] < 2:
+            break
+        length += 1
+    return length
+
+
+def strip_redundant_prefix(media):
+    while True:
+        cut = redundant_prefix_len(media) or leading_duplicate_len(media)
+        if cut == 0:
+            return media
+        media = media[cut:]
+
+
+def inspect_tags(path):
+    sample_rate, has_audio_config, has_video_config, media = iter_media_packets(
+        path, "scanning"
+    )
+    if not media:
+        raise RuntimeError("no media packets found")
+
+    kept = strip_redundant_prefix(media)
+    if not kept:
+        raise RuntimeError("nothing left after dropping redundant packets")
+    dropped = media[: len(media) - len(kept)]
+
+    base = min(timestamp for _, timestamp, _ in kept)
+    span = max(timestamp for _, timestamp, _ in kept) - base
 
     return {
-        "audio_packets": audio_packets,
-        "video_packets": video_packets,
+        "audio_packets": sum(1 for tag_type, _, _ in kept if tag_type == 8),
+        "video_packets": sum(1 for tag_type, _, _ in kept if tag_type == 9),
         "sample_rate": sample_rate,
         "has_audio_config": has_audio_config,
         "has_video_config": has_video_config,
-        "audio_prefix_skip": audio_prefix_skip,
-        "video_prefix_skip": video_prefix_skip,
+        "audio_prefix_skip": sum(1 for tag_type, _, _ in dropped if tag_type == 8),
+        "video_prefix_skip": sum(1 for tag_type, _, _ in dropped if tag_type == 9),
         "base": base,
+        "duration_ms": span,
     }
-
-
-def duplicate_prefix_count(keys):
-    if not keys:
-        return 0
-    counts = Counter(keys)
-    count = 0
-    for key in keys:
-        if counts[key] < 2:
-            break
-        count += 1
-    return count
 
 
 def write_tag(output_file, tag_type, timestamp, payload):
@@ -242,6 +287,12 @@ def repair(source, output):
         f"valid video packets: {info['video_packets']}, "
         f"sample rate: {info['sample_rate']}"
     )
+    if info["audio_prefix_skip"] or info["video_prefix_skip"]:
+        print(
+            f"dropped redundant prefix: {info['audio_prefix_skip']} audio / "
+            f"{info['video_prefix_skip']} video packets"
+        )
+    expected_duration = info["duration_ms"] / 1000.0
 
     with tempfile.TemporaryDirectory(dir=output.parent) as temp_dir:
         clean_flv = Path(temp_dir) / f"{source.stem}.clean.flv"
@@ -275,7 +326,12 @@ def repair(source, output):
             return False
         video_duration, audio_duration = durations
         print(f"video duration: {video_duration:.3f}s, audio duration: {audio_duration:.3f}s")
-        return abs(video_duration - audio_duration) < 0.5
+        tolerance = max(1.0, expected_duration * 0.01)
+        return (
+            expected_duration > 0
+            and abs(video_duration - expected_duration) < tolerance
+            and abs(audio_duration - expected_duration) < tolerance
+        )
 
 
 def iter_flv_files(directory):
