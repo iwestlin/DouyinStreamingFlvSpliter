@@ -1,0 +1,10 @@
+.DS_Store
+
+split_output/
+
+*.mp4
+*_streamcopy.mp4
+
+10.flv
+t.flv
+test.flv
