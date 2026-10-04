@@ -81,6 +81,44 @@ A: 如果文件只包含一个片段（没有多个Script Tag），工具会直�
 - `split_flv.py`: 炸内存版本
 - `split_flv_streaming.py`: 流式处理版本（推荐使用）
 
+- `fix_flv_split.py` / `fix_flv_split.js`: 多配置混合直播 FLV 分割工具（Python / Node.js 双版本）
+
+## 多配置FLV分割工具 (fix_flv_split)
+
+> `fix_flv_split.js` 由 `fix_flv_split.py` 转写而来，行为一致。
+
+处理录制中途切换分辨率 / SPS-PPS（多次重连、清晰度切换、PK 分屏）且分片可能乱序存放的直播 FLV：
+
+1. 按 onMetaData、时间戳回退、音视频配置变化把文件切成小段；
+2. 收集文件里出现过的每一个视频配置（sequence header）；
+3. 对每段用 ffprobe 试解码，挑出真正匹配它的配置；
+4. 按起始时间排序，把配置相同的连续小段合并成一个可播放的分片；
+5. 每个分片只注入一次它自己的 sequence header，并从关键帧开始、时间戳归零；
+6. 可选 `--mp4` 把每个分片 remux 成 MP4。
+
+### 安装依赖
+
+- Python 3.6+ 或 Node.js
+- FFmpeg（提供 `ffmpeg` / `ffprobe`）
+
+### 使用方法
+
+```bash
+# Python 版本
+python3 fix_flv_split.py input.flv [-o OUTDIR] [--dry-run] [--mp4] [--overwrite]
+
+# Node.js 版本（行为一致）
+node fix_flv_split.js input.flv [-o OUTDIR] [--dry-run] [--mp4] [--overwrite]
+```
+
+### 参数说明
+
+- `input.flv`: 输入的混合配置 FLV 文件路径（必需）
+- `-o, --output-dir`: 输出目录（可选，默认为源文件所在目录）
+- `--dry-run`: 只打印分段计划，不写出文件
+- `--mp4`: 每个分片额外 remux 成 MP4
+- `--overwrite`: 覆盖已存在的输出文件
+
 ## 其它工具  
 本项目为作者vibe coding娱乐向，推荐使用 [https://rec.danmuji.org/user/toolbox/analyze-repair/](https://rec.danmuji.org/user/toolbox/analyze-repair/) 的
 
